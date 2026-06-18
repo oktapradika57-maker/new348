@@ -2,31 +2,32 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+import requests
 from io import BytesIO
 
 # Pustaka untuk Export PPT & PDF
 from pptx import Presentation
 from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
 # =========================================================================
-# ⚙️ KONFIGURASI OPERASIONAL & URL RESOURCE
+# ⚙️ KONFIGURASI HALAMAN
 # =========================================================================
 st.set_page_config(
-    page_title="PLN & Infrastructure Asset Dashboard",
+    page_title="Infrastructure Asset Report",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ID Spreadsheet "348 Tsel"
 SPREADSHEET_ID = "1FGKOzWoUrbf3PXN_ahgG1t-83JZT4H4sioQepePbBxM"
-# Menggunakan format gviz/tq kembali untuk memastikan seluruh data struktural ditarik dengan aman
 csv_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv"
 
+# Fungsi bypass Google Drive agar foto wajib muncul langsung di Streamlit & PPT
 def format_drive_image_url(url_or_id):
     val = str(url_or_id).strip()
     if val == "" or val.lower() == "nan":
@@ -38,12 +39,12 @@ def format_drive_image_url(url_or_id):
         doc_id = val
     return f"https://lh3.googleusercontent.com/d/{doc_id}"
 
-st.title("⚡ Infrastructure Power & Asset Dashboard")
-st.caption("Live Synchronization with Google Sheets Resource (348 Tsel) & Voltage RST Pattern Analytics")
+st.title("⚡ Infrastructure Asset & Site Report")
+st.caption("Live Synchronization with Google Sheets (348 Tsel) & Full PPT Document Generation")
 st.markdown("---")
 
 # =========================================================================
-# 💾 LOAD DATA DENGAN ANTI-CRASH PROTECTION
+# 💾 LOAD DATA
 # =========================================================================
 @st.cache_data(ttl=2)
 def load_financial_data(url):
@@ -53,178 +54,184 @@ def load_financial_data(url):
     except Exception as e:
         return str(e)
 
-with st.spinner("🔄 Sedang memuat resource data terbaru dari Google Sheets..."):
+with st.spinner("🔄 Memuat database ..."):
     df_raw = load_financial_data(csv_url)
 
 if isinstance(df_raw, str):
-    st.error("⚠️ Gagal memuat data dari link Google Sheets yang diberikan.")
-    st.markdown(f"**Detail Error:** `{df_raw}`")
+    st.error(f"⚠️ Gagal memuat data. Detail Error: `{df_raw}`")
     st.stop()
-
 elif df_raw is None or df_raw.empty:
-    st.warning("⚠️ Data yang diunduh kosong. Silakan periksa apakah tab pertama di Google Sheets Anda berisi data atau kosong.")
+    st.warning("⚠️ Data di dalam spreadsheet kosong.")
     st.stop()
-
 else:
-    # Bersihkan baris/kolom yang benar-benar kosong
     df = df_raw.dropna(how='all', axis=1).copy()
     df = df.dropna(how='all', axis=0)
 
-    # =========================================================================
-    # 🔍 DETEKSI KOLOM SECARA DINAMIS (DENGAN FALLBACK AMAN)
-    # =========================================================================
-    columns_list = [str(c).strip() for c in df.columns]
-    
-    KOLOM_UTAMA = next((c for c in df.columns if any(p in str(c).upper() for p in ['SITE ID', 'SITE_ID', 'NAMA GARDU', 'COMPONENT', 'TOWER ID', 'NAMA'])), df.columns[0])
+    # 🔍 DETEKSI DUA PILIHAN PENCARIAN (SITE ID ATAU COMPONENT)
+    KOLOM_UTAMA = next((c for c in df.columns if any(p in str(c).upper() for p in ['SITE ID', 'SITE_ID', 'TOWER ID', 'COMPONENT'])), df.columns[0])
     KOLOM_DAYA = next((c for c in df.columns if any(p in str(c).upper() for p in ['DAYA', 'KAPASITAS', 'POWER'])), None)
     KOLOM_LOKASI = next((c for c in df.columns if any(p in str(c).upper() for p in ['LOKASI', 'LOCATION', 'ALAMAT', 'WITEL'])), None)
     KOLOM_FOTO = next((c for c in df.columns if any(p in str(c).upper() for p in ['FOTO', 'LINK FOTO', 'GAMBAR', 'DRIVE IMAGE'])), None)
 
-    # Deteksi fasa Voltage RST
-    KOLOM_VR = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE R', 'TEGANGAN R', 'VOLT R', 'V_R', 'VR'])), None)
-    KOLOM_VS = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE S', 'TEGANGAN S', 'VOLT S', 'V_S', 'VS'])), None)
-    KOLOM_VT = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE T', 'TEGANGAN T', 'VOLT T', 'V_T', 'VT'])), None)
+    # Deteksi fasa Voltage
+    KOLOM_VR = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE R', 'TEGANGAN R', 'VR'])), None)
+    KOLOM_VS = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE S', 'TEGANGAN S', 'VS'])), None)
+    KOLOM_VT = next((c for c in df.columns if any(p in str(c).upper() for p in ['VOLTAGE T', 'TEGANGAN T', 'VT'])), None)
 
-    # --- SIDEBAR PANEL FILTER ---
-    st.sidebar.header("⚙️ Panel Filter Resource")
+    # --- SIDEBAR: PENCARIAN SITE ID ---
+    st.sidebar.header("⚙️ Pencarian Site ID / Asset")
+    df[KOLOM_UTAMA] = df[KOLOM_UTAMA].fillna("Unknown").astype(str).str.strip()
     
-    # Pastikan data kolom utama dikonversi ke string dan dibersihkan dari nan
-    df[KOLOM_UTAMA] = df[KOLOM_UTAMA].fillna("Tanpa Nama").astype(str)
-    unique_items = ["Semua Komponen"] + sorted(list(df[KOLOM_UTAMA].unique()))
-    selected_item = st.sidebar.selectbox(f"Pilih {KOLOM_UTAMA}:", unique_items)
+    search_query = st.sidebar.text_input("🔍 Cari Berdasarkan Site ID:", "")
+    
+    if search_query:
+        df_filtered = df[df[KOLOM_UTAMA].str.contains(search_query, case=False, na=False)]
+    else:
+        unique_items = sorted(list(df[KOLOM_UTAMA].unique()))
+        selected_item = st.sidebar.selectbox(f"Atau Pilih dari Daftar {KOLOM_UTAMA}:", unique_items)
+        df_filtered = df[df[KOLOM_UTAMA] == selected_item]
 
     if st.sidebar.button("🔄 Clear Cache & Refresh", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    # --- PROSES FILTER DATA ---
-    df_filtered = df.copy()
-    if selected_item != "Semua Komponen":
-        df_filtered = df_filtered[df_filtered[KOLOM_UTAMA] == selected_item]
-
     # =========================================================================
-    # 📊 SEKSI GRAFIK ANALISA TEGANGAN VOLTAGE RST
+    # 🏗️ LAYOUT BARU: DIBUAT 3 BAGIAN UTAMA YANG RAPI per BARIS DATA
     # =========================================================================
-    st.subheader("📈 Pola Power & Grafik Analisa Tegangan RST")
-    
-    if (KOLOM_VR or KOLOM_VS or KOLOM_VT) and not df_filtered.empty:
-        try:
-            chart_data = df_filtered.copy()
-            build_chart = pd.DataFrame(index=chart_data[KOLOM_UTAMA])
-            
-            # Bersihkan nilai string ke numerik secara aman
-            for name, col_obj in [('Voltage R', KOLOM_VR), ('Voltage S', KOLOM_VS), ('Voltage T', KOLOM_VT)]:
-                if col_obj:
-                    clean_val = chart_data[col_obj].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                    build_chart[name] = pd.to_numeric(clean_val, errors='coerce').fillna(0).values
-            
-            st.line_chart(build_chart)
-        except Exception as chart_err:
-            st.info("💡 Grafik tren belum dapat ditampilkan karena format tipe data numerik fasa sedang disinkronkan.")
+    if df_filtered.empty:
+        st.warning("⚠️ Site ID atau data tidak ditemukan.")
     else:
-        st.info("💡 Pilih salah satu item atau pastikan fasa Voltage R, S, T terisi untuk melihat grafik tren daya.")
-
-    st.markdown("---")
-
-    # --- TAMPILAN TABEL UTAMA ---
-    st.subheader("📋 Detail Rincian Data")
-    st.dataframe(df_filtered, use_container_width=True, hide_index=True)
-
-    # --- BAGIAN VISUALISASI GAMBAR GOOGLE DRIVE ---
-    if KOLOM_FOTO and KOLOM_FOTO in df_filtered.columns:
-        st.markdown("---")
-        st.subheader("🖼️ Dokumentasi Visual Aset (Google Drive)")
-        
-        grid_cols = st.columns(3)
         for idx, row in df_filtered.reset_index(drop=True).iterrows():
-            with grid_cols[idx % 3]:
-                detail_text = f"⚡ Daya: {row[KOLOM_DAYA]}" if KOLOM_DAYA else ""
-                loc_text = f"📍 Lokasi: {row[KOLOM_LOKASI]}" if KOLOM_LOKASI else ""
+            st.markdown(f"### 📍 Site Profil: {row[KOLOM_UTAMA]}")
+            
+            # Membuat Pembagian Layout Tiga Bagian Sejajar
+            layout_col1, layout_col2, layout_col3 = st.columns([1.5, 1.2, 1.3])
+            
+            # --- BAGIAN 1: KETERANGAN HURUF DAN ANGKA YANG RAPI ---
+            with layout_col1:
+                st.markdown("📝 **Spesifikasi & Informasi Teknis**")
                 
-                vr_val = f" R: {row[KOLOM_VR]}V" if KOLOM_VR else ""
-                vs_val = f" S: {row[KOLOM_VS]}V" if KOLOM_VS else ""
-                vt_val = f" T: {row[KOLOM_VT]}V" if KOLOM_VT else ""
-                volt_summary = f"📊 Voltase:{vr_val}{vs_val}{vt_val}" if (KOLOM_VR or KOLOM_VS or KOLOM_VT) else ""
+                # Menampilkan metrik utama daya jika ada
+                if KOLOM_DAYA and pd.notnull(row[KOLOM_DAYA]):
+                    st.metric(label="Kapasitas / Daya Terpasang", value=f"{row[KOLOM_DAYA]}")
+                
+                # Tampilkan seluruh kolom teks pendukung dalam bentuk list ringkas yang bersih
+                info_html = ""
+                for col in df_filtered.columns:
+                    if col not in [KOLOM_UTAMA, KOLOM_FOTO, KOLOM_VR, KOLOM_VS, KOLOM_VT, KOLOM_DAYA]:
+                        val_str = str(row[col]).strip()
+                        if val_str != "" and val_str.lower() != "nan":
+                            info_html += f"**{col}**: {val_str}  \n"
+                st.markdown(info_html if info_html else "*Tidak ada keterangan tambahan.*")
 
-                st.info(f"**{row[KOLOM_UTAMA]}**\n\n{detail_text}\n\n{loc_text}\n\n{volt_summary}")
+            # --- BAGIAN 2: POLA POWER & VOLTAGE ANALYTICS ---
+            with layout_col2:
+                st.markdown("📈 **Status Pola Tegangan (R-S-T)**")
+                vr = row[KOLOM_VR] if KOLOM_VR and pd.notnull(row[KOLOM_VR]) else 0
+                vs = row[KOLOM_VS] if KOLOM_VS and pd.notnull(row[KOLOM_VS]) else 0
+                vt = row[KOLOM_VT] if KOLOM_VT and pd.notnull(row[KOLOM_VT]) else 0
                 
-                cell_foto_val = str(row[KOLOM_FOTO]).strip()
-                if cell_foto_val != "" and cell_foto_val.lower() != "nan":
-                    img_url = format_drive_image_url(cell_foto_val)
+                # Mini Grid internal untuk status angka voltase fasa
+                v_c1, v_c2, v_c3 = st.columns(3)
+                v_c1.metric("Fasa R", f"{vr}V")
+                v_c2.metric("Fasa S", f"{vs}V")
+                v_c3.metric("Fasa T", f"{vt}V")
+                
+                # Tampilkan pola visual dalam bentuk chart batang mini khusus per fasa
+                volt_df = pd.DataFrame({"Voltase (V)": [float(str(vr).replace('V','').strip() or 0), 
+                                                        float(str(vs).replace('V','').strip() or 0), 
+                                                        float(str(vt).replace('V','').strip() or 0)]}, 
+                                       index=["Rasa R", "Fasa S", "Fasa T"])
+                st.bar_chart(volt_df, height=140)
+
+            # --- BAGIAN 3: FOTO HASIL DARI GOOGLE DRIVE (WAJIB KELIHATAN) ---
+            with layout_col3:
+                st.markdown("🖼️ **Dokumentasi Hasil Lapangan**")
+                cell_foto = str(row[KOLOM_FOTO]).strip() if KOLOM_FOTO else ""
+                
+                if cell_foto != "" and cell_foto.lower() != "nan":
+                    img_url = format_drive_image_url(cell_foto)
                     if img_url:
-                        st.image(img_url, use_container_width=True, caption=f"Asset View - {row[KOLOM_UTAMA]}")
+                        st.image(img_url, use_container_width=True, caption=f"Kondisi Fisik {row[KOLOM_UTAMA]}")
                 else:
-                    st.warning("⚠️ Kolom foto kosong / belum diisi.")
+                    st.warning("⚠️ Foto belum diinput atau link kosong di Google Sheets.")
+            
+            st.markdown("---")
 
-    st.markdown("---")
+        # =========================================================================
+        # 📥 PANEL EXPORT PPTX MERANGKUM LENGKAP DENGAN GAMBAR & LAYOUT
+        # =========================================================================
+        st.subheader("📥 Export Laporan Komprehensif per Site ID")
+        
+        def generate_full_report_pptx(data_target):
+            prs = Presentation()
+            
+            for _, r_data in data_target.iterrows():
+                # Gunakan Blank Layout agar peletakan text dan gambar bisa di-custom mirip layout dashboard
+                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                
+                # 1. Judul Slide (Header)
+                tx_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(9), Inches(0.8))
+                tf = tx_box.text_frame
+                p = tf.paragraphs[0]
+                p.text = f"SITE REPORT: {r_data[KOLOM_UTAMA]}"
+                p.font.size = Pt(24)
+                p.font.bold = True
+                
+                # 2. Kotak Keterangan Huruf & Angka (Sebelah Kiri)
+                desc_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(4.5), Inches(5.5))
+                desc_tf = desc_box.text_frame
+                desc_tf.word_wrap = True
+                
+                p_daya = desc_tf.paragraphs[0]
+                p_daya.text = f"Daya/Kapasitas: {r_data[KOLOM_DAYA] if KOLOM_DAYA else '-'}\n"
+                p_daya.font.bold = True
+                
+                # Tambahkan baris keterangan teknis lainnya
+                for col_name in data_target.columns:
+                    if col_name not in [KOLOM_UTAMA, KOLOM_FOTO, KOLOM_VR, KOLOM_VS, KOLOM_VT, KOLOM_DAYA]:
+                        val_txt = str(r_data[col_name]).strip()
+                        if val_txt != "" and val_txt.lower() != "nan":
+                            p_info = desc_tf.add_paragraph()
+                            p_info.text = f"• {col_name}: {val_txt}"
+                            p_info.font.size = Pt(11)
+                
+                # Tambahkan keterangan Voltage RST di bagian bawah teks kiri
+                p_volt = desc_tf.add_paragraph()
+                p_volt.text = f"\nVoltase RST: R={r_data[KOLOM_VR]}V | S={r_data[KOLOM_VS]}V | T={r_data[KOLOM_VT]}V"
+                p_volt.font.size = Pt(12)
+                p_volt.font.bold = True
+                p_volt.font.color.rgb = colors.HexColor("#10b981")
 
-    # =========================================================================
-    # 📥 PANEL GENERATOR EXPORT DATA DYNAMIC (PPTX & PDF)
-    # =========================================================================
-    st.subheader("📥 Export Laporan Sesuai Pilihan")
-    
-    def generate_pptx(data_target):
-        prs = Presentation()
-        slide = prs.slides.add_slide(prs.slide_layouts[5])
-        slide.shapes.title.text = f"Laporan Analisa Infrastruktur"
-        cols_to_include = data_target.columns[:5]
-        rows, cols = data_target.shape[0] + 1, len(cols_to_include)
-        left, top, width, height = Inches(0.5), Inches(2), Inches(9), Inches(3.5)
-        table_shape = slide.shapes.add_table(rows, cols, left, top, width, height)
-        table = table_shape.table
-        for c_idx, col_name in enumerate(cols_to_include):
-            table.cell(0, c_idx).text = str(col_name)
-        for r_idx, (_, row) in enumerate(data_target.iterrows()):
-            for c_idx, col_name in enumerate(cols_to_include):
-                table.cell(r_idx + 1, c_idx).text = str(row[col_name])
-        output = BytesIO()
-        prs.save(output)
-        output.seek(0)
-        return output
+                # 3. Download & Tempel Gambar Dokumentasi Google Drive (Sebelah Kanan)
+                f_cell = str(r_data[KOLOM_FOTO]).strip() if KOLOM_FOTO else ""
+                if f_cell != "" and f_cell.lower() != "nan":
+                    g_url = format_drive_image_url(f_cell)
+                    try:
+                        # Stream gambar langsung dari URL internet ke memori PPTX
+                        response = requests.get(g_url, timeout=5)
+                        if response.status_code == 200:
+                            img_stream = BytesIO(response.content)
+                            # Letakkan di sisi kanan slide (Left=5.2 inci, Top=1.5 inci, Width=4.3 inci)
+                            slide.shapes.add_picture(img_stream, Inches(5.2), Inches(1.5), width=Inches(4.3))
+                    except Exception:
+                        # Jika timeout/gagal download gambar, beri penanda box teks error di PPT
+                        err_box = slide.shapes.add_textbox(Inches(5.2), Inches(1.5), Inches(4.3), Inches(2))
+                        err_box.text_frame.text = "[Gagal memuat visual dokumentasi dari Drive ke PPT]"
+            
+            output = BytesIO()
+            prs.save(output)
+            output.seek(0)
+            return output
 
-    def generate_pdf(data_target):
-        output = BytesIO()
-        doc = SimpleDocTemplate(output, pagesize=letter)
-        styles = getSampleStyleSheet()
-        story = []
-        story.append(Paragraph(f"<b>LAPORAN DATA ASSET INFRASTRUKTUR</b>", styles['Title']))
-        story.append(Spacer(1, 15))
-        cols_to_print = data_target.columns[:4]
-        table_content = [list(cols_to_print)]
-        for _, row in data_target.iterrows():
-            row_data = [str(row[c]) for c in cols_to_print]
-            table_content.append(row_data)
-        pdf_table = Table(table_content)
-        pdf_table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#10b981")),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 6),
-            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#f9fafb")),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#e5e7eb"))
-        ]))
-        story.append(pdf_table)
-        doc.build(story)
-        output.seek(0)
-        return output
-
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        ppt_file = generate_pptx(df_filtered)
-        st.download_button(
-            label="📊 Download Laporan PowerPoint (.pptx)",
-            data=ppt_file,
-            file_name="Laporan_Asset_PLN.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            use_container_width=True
-        )
-    with col_btn2:
-        pdf_file = generate_pdf(df_filtered)
-        st.download_button(
-            label="📄 Download Laporan PDF (.pdf)",
-            data=pdf_file,
-            file_name="Laporan_Asset_PLN.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
+        # Tombol aksi download PPT yang merangkum seluruh layout dan data fasa
+        if st.button("📊 Generate & Download PPTX Report Terpilih", type="primary", use_container_width=True):
+            with st.spinner("⏳ Mengunduh gambar & menyusun struktur slide PPTX..."):
+                full_ppt = generate_full_report_pptx(df_filtered)
+                st.download_button(
+                    label="📥 Klik di Sini Untuk Mengunduh File .PPTX",
+                    data=full_ppt,
+                    file_name=f"Full_Report_Site_{search_query or 'Filtered'}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    use_container_width=True
+                )
